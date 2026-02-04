@@ -40,14 +40,11 @@ class Neo4jConnection:
         username = os.getenv('NEO4J_USERNAME')
         password = os.getenv('NEO4J_PASSWORD')
         
-        uri = uri.replace('neo4j+s://', 'bolt://')
-        uri = uri.replace('neo4j+ssc://', 'bolt://')
+        print(f"Connecting to Neo4j: {uri}")
+        print(f"Username: {username}")
         
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        self.driver = GraphDatabase.driver(uri, auth=(username, password), ssl_context=ssl_context)
+        # Neo4j Aura는 neo4j+s:// 프로토콜 사용
+        self.driver = GraphDatabase.driver(uri, auth=(username, password))
     
     def close(self):
         if self.driver:
@@ -94,7 +91,7 @@ def get_variance_graph(variance_id):
         v = result['v']
         nodes.append({
             'id': v.element_id,
-            'label': v['id'],
+            'label': v.get('variance_name', v['id']),
             'type': 'Variance',
             'color': '#98D8C8',
             'size': 30,
@@ -245,7 +242,7 @@ def get_cause_graph(cause_code):
             if v:
                 nodes.append({
                     'id': v.element_id,
-                    'label': v['id'],
+                    'label': v.get('variance_name', v['id']),
                     'type': 'Variance',
                     'color': '#98D8C8',
                     'size': 20,
@@ -317,6 +314,34 @@ def get_variances_by_type():
         results = session.run(query, 
                             variance_type=variance_type,
                             cost_element=cost_element).data()
+        
+        return jsonify(results)
+
+
+@app.route('/api/variances/by-element', methods=['GET'])
+def get_variances_by_element():
+    """원가요소별 생산오더 목록 (MATERIAL, LABOR, OVERHEAD)"""
+    cost_element = request.args.get('element', '')
+    
+    with neo4j_conn.driver.session() as session:
+        query = """
+        MATCH (po:ProductionOrder)-[:HAS_VARIANCE]->(v:Variance)
+        OPTIONAL MATCH (po)-[:WORKS_AT]->(wc:WorkCenter)
+        WHERE v.cost_element = $cost_element
+        WITH po, wc,
+             SUM(v.variance_amount) as total_variance,
+             COUNT(v) as variance_count
+        RETURN elementId(po) as po_id,
+               po.id as order_no,
+               po.product_cd as product,
+               wc.id as work_center,
+               total_variance,
+               variance_count
+        ORDER BY ABS(total_variance) DESC
+        LIMIT 30
+        """
+        
+        results = session.run(query, cost_element=cost_element).data()
         
         return jsonify(results)
 
@@ -424,7 +449,7 @@ def get_product_graph(product_cd):
             if v:
                 nodes.append({
                     'id': v.element_id,
-                    'label': v['id'],
+                    'label': v.get('variance_name', v['id']),
                     'type': 'Variance',
                     'color': '#98D8C8',
                     'size': 25,
@@ -579,7 +604,7 @@ def get_material_graph(material_id):
             if v:
                 nodes.append({
                     'id': v.element_id,
-                    'label': v['id'],
+                    'label': v.get('variance_name', v['id']),
                     'type': 'Variance',
                     'color': '#98D8C8',
                     'size': 25,
@@ -733,7 +758,7 @@ def get_workcenter_graph(workcenter_id):
             if v:
                 nodes.append({
                     'id': v.element_id,
-                    'label': v['id'],
+                    'label': v.get('variance_name', v['id']),
                     'type': 'Variance',
                     'color': '#98D8C8',
                     'size': 25,
@@ -884,7 +909,7 @@ def get_production_order_graph(order_no):
             if v:
                 nodes.append({
                     'id': v.element_id,
-                    'label': v['id'],
+                    'label': v.get('variance_name', v['id']),
                     'type': 'Variance',
                     'color': '#98D8C8',
                     'size': 25,
@@ -992,62 +1017,108 @@ def expand_node(node_id):
         WHERE elementId(n) = $node_id
         MATCH (n)-[r]-(connected)
         RETURN n, 
+               connected,
+               r,
                type(r) as rel_type,
-               collect(DISTINCT {
-                   node: connected,
-                   rel: r,
-                   direction: CASE 
-                       WHEN startNode(r) = n THEN 'out'
-                       ELSE 'in'
-                   END
-               }) as connections
+               CASE 
+                   WHEN startNode(r) = n THEN 'out'
+                   ELSE 'in'
+               END as direction
         LIMIT 50
         """
         
-        result = session.run(query, node_id=node_id).single()
-        
-        if not result:
-            return jsonify({'error': 'Node not found'}), 404
+        results = session.run(query, node_id=node_id)
         
         nodes = []
         edges = []
+        seen_nodes = set()
+        seen_edges = set()
         
-        # 중심 노드
-        center = result['n']
-        center_type = list(center.labels)[0]
-        nodes.append({
-            'id': center.element_id,
-            'label': center.get('id') or center.get('name') or center.get('description'),
-            'type': center_type,
-            'properties': serialize_neo4j_types(dict(center))
-        })
+        # 중심 노드 먼저 추가
+        first_result = None
+        for record in results:
+            if first_result is None:
+                first_result = record
+                center = record['n']
+                center_type = list(center.labels)[0]
+                center_id = center.element_id
+                
+                if center_id not in seen_nodes:
+                    # Variance 노드는 variance_name 우선 사용
+                    if center_type == 'Variance':
+                        center_label = center.get('variance_name', center.get('id'))
+                    else:
+                        center_label = center.get('id') or center.get('name') or center.get('description')
+                    
+                    nodes.append({
+                        'id': center_id,
+                        'label': center_label,
+                        'type': center_type,
+                        'color': get_node_color(center_type),
+                        'size': 30,
+                        'properties': serialize_neo4j_types(dict(center))
+                    })
+                    seen_nodes.add(center_id)
+            
+            # 연결된 노드 추가
+            connected = record['connected']
+            node_type = list(connected.labels)[0]
+            node_id = connected.element_id
+            
+            if node_id not in seen_nodes:
+                # Variance 노드는 variance_name 우선 사용
+                if node_type == 'Variance':
+                    node_label = connected.get('variance_name', connected.get('id'))
+                else:
+                    node_label = connected.get('id') or connected.get('name') or connected.get('description')
+                
+                # 노드 색상 매핑
+                color_map = {
+                    'Variance': '#98D8C8',
+                    'ProductionOrder': '#45B7D1',
+                    'Product': '#FF6B6B',
+                    'Material': '#4ECDC4',
+                    'WorkCenter': '#F7DC6F',
+                    'Cause': '#F8B739'
+                }
+                
+                nodes.append({
+                    'id': node_id,
+                    'label': node_label,
+                    'type': node_type,
+                    'color': color_map.get(node_type, '#95A5A6'),
+                    'size': 25,
+                    'properties': serialize_neo4j_types(dict(connected))
+                })
+                seen_nodes.add(node_id)
+            
+            # 관계(edge) 추가
+            rel = record['r']
+            rel_type = record['rel_type']
+            direction = record['direction']
+            edge_id = f"{center.element_id}-{node_id}-{rel_type}"
+            
+            if edge_id not in seen_edges:
+                if direction == 'out':
+                    edges.append({
+                        'id': edge_id,
+                        'from': center.element_id,
+                        'to': node_id,
+                        'label': rel_type,
+                        'arrows': 'to'
+                    })
+                else:
+                    edges.append({
+                        'id': edge_id,
+                        'from': node_id,
+                        'to': center.element_id,
+                        'label': rel_type,
+                        'arrows': 'to'
+                    })
+                seen_edges.add(edge_id)
         
-        # 연결된 노드들
-        for conn in result['connections']:
-            node = conn['node']
-            rel = conn['rel']
-            direction = conn['direction']
-            
-            node_type = list(node.labels)[0]
-            nodes.append({
-                'id': node.element_id,
-                'label': node.get('id') or node.get('name') or node.get('description'),
-                'type': node_type,
-                'properties': serialize_neo4j_types(dict(node))
-            })
-            
-            if direction == 'out':
-                edges.append({
-                    'from': center.element_id,
-                    'to': node.element_id,
-                    'label': rel.type
-                })
-            else:
-                edges.append({
-                    'from': node.element_id,
-                    'to': center.element_id,
-                    'label': rel.type
-                })
+        if not first_result:
+            return jsonify({'error': 'Node not found'}), 404
         
         return jsonify({
             'nodes': nodes,
@@ -1235,10 +1306,11 @@ def get_filtered_summary():
         
         type_query += """
         RETURN 
+            v.cost_element as cost_element,
             v.variance_type as variance_type,
             SUM(v.variance_amount) as total_variance,
             COUNT(v) as count
-        ORDER BY variance_type
+        ORDER BY cost_element
         """
         
         by_type = session.run(type_query,
@@ -1283,25 +1355,44 @@ def test_produces(order_no):
             })
 
 
+@app.route('/test')
+def test_route():
+    """테스트 라우트"""
+    return jsonify({'status': 'ok', 'message': 'API is working!'})
+
 @app.route('/')
 def index():
     """메인 페이지 - 대시보드 홈"""
-    return send_file('../dashboard.html')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    html_path = os.path.join(base_dir, 'dashboard.html')
+    if not os.path.exists(html_path):
+        return f"File not found: {html_path}", 404
+    with open(html_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    from flask import Response
+    return Response(content, mimetype='text/html')
 
 @app.route('/analysis.html')
 def analysis():
     """상세 분석 페이지 - 리다이렉트"""
-    return send_file('../variance_graph_dashboard_v3.html')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return send_file(os.path.join(base_dir, 'variance_graph_dashboard_v3.html'))
 
 @app.route('/variance_graph_dashboard_v3.html')
 def variance_graph_v3():
     """상세 분석 페이지 v3"""
-    return send_file('../variance_graph_dashboard_v3.html')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    response = send_file(os.path.join(base_dir, 'variance_graph_dashboard_v3.html'))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/comparison.html')
 def comparison():
     """비교 분석 페이지"""
-    return send_file('../comparison.html')
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return send_file(os.path.join(base_dir, 'comparison.html'))
 
 
 @app.route('/api/dashboard-data', methods=['POST'])
@@ -1561,7 +1652,7 @@ if __name__ == '__main__':
     print("  Variance Graph API Server")
     print("=" * 80)
     print("\nServer starting...")
-    print("Address: http://localhost:5000")
+    print("Address: http://localhost:8000")
     print("\nAvailable APIs:")
     print("  GET /api/variance/<id>/graph")
     print("  GET /api/cause/<code>/graph")
@@ -1575,10 +1666,10 @@ if __name__ == '__main__':
     print("  GET /api/filters")
     print("  POST /api/filtered_summary")
     print("  GET /api/variances/by-type")
-    print("\nOpen http://localhost:5000 in browser")
+    print("\nOpen http://localhost:8000 in browser")
     print("=" * 80 + "\n")
     
     try:
-        app.run(debug=True, host='0.0.0.0', port=5000)
+        app.run(debug=False, host='0.0.0.0', port=8000)
     finally:
         neo4j_conn.close()

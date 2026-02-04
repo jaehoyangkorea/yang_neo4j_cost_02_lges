@@ -43,25 +43,25 @@ class Neo4jDataLoader:
             )
             # 연결 테스트
             self.driver.verify_connectivity()
-            print(f"✓ Neo4j 연결 성공: {uri}")
+            print(f"[OK] Neo4j 연결 성공: {uri}")
             return True
         except Exception as e:
-            print(f"✗ Neo4j 연결 실패: {str(e)}")
+            print(f"[X] Neo4j 연결 실패: {str(e)}")
             return False
     
     def close(self):
         """연결 종료"""
         if self.driver:
             self.driver.close()
-            print("✓ 연결 종료")
+            print("[OK] 연결 종료")
     
     def clear_database(self):
         """데이터베이스 초기화 (주의!)"""
-        print("\n⚠️  데이터베이스 초기화 중...")
+        print("\n[!]  데이터베이스 초기화 중...")
         with self.driver.session(database=self.database) as session:
             # 모든 노드와 관계 삭제
             session.run("MATCH (n) DETACH DELETE n")
-        print("✓ 데이터베이스 초기화 완료")
+        print("[OK] 데이터베이스 초기화 완료")
     
     def create_schema(self):
         """스키마 (제약조건, 인덱스) 생성"""
@@ -75,16 +75,19 @@ class Neo4jDataLoader:
                 "CREATE CONSTRAINT workcenter_id IF NOT EXISTS FOR (wc:WorkCenter) REQUIRE wc.id IS UNIQUE",
                 "CREATE CONSTRAINT production_order_id IF NOT EXISTS FOR (po:ProductionOrder) REQUIRE po.id IS UNIQUE",
                 "CREATE CONSTRAINT variance_id IF NOT EXISTS FOR (v:Variance) REQUIRE v.id IS UNIQUE",
-                "CREATE CONSTRAINT cause_code IF NOT EXISTS FOR (c:Cause) REQUIRE c.code IS UNIQUE"
+                "CREATE CONSTRAINT cause_code IF NOT EXISTS FOR (c:Cause) REQUIRE c.code IS UNIQUE",
+                "CREATE CONSTRAINT quality_defect_id IF NOT EXISTS FOR (qd:QualityDefect) REQUIRE qd.id IS UNIQUE",
+                "CREATE CONSTRAINT equipment_failure_id IF NOT EXISTS FOR (ef:EquipmentFailure) REQUIRE ef.id IS UNIQUE",
+                "CREATE CONSTRAINT material_market_id IF NOT EXISTS FOR (mm:MaterialMarket) REQUIRE mm.id IS UNIQUE"
             ]
             
             for constraint in constraints:
                 try:
                     session.run(constraint)
-                    print(f"  ✓ {constraint.split()[2]}")
+                    print(f"  [OK] {constraint.split()[2]}")
                 except Exception as e:
                     if "already exists" not in str(e).lower():
-                        print(f"  ✗ 제약조건 생성 실패: {str(e)}")
+                        print(f"  [X] 제약조건 생성 실패: {str(e)}")
             
             # 인덱스
             indexes = [
@@ -99,94 +102,114 @@ class Neo4jDataLoader:
             for index in indexes:
                 try:
                     session.run(index)
-                    print(f"  ✓ {index.split()[2]}")
+                    print(f"  [OK] {index.split()[2]}")
                 except Exception as e:
                     if "already exists" not in str(e).lower():
-                        print(f"  ✗ 인덱스 생성 실패: {str(e)}")
+                        print(f"  [X] 인덱스 생성 실패: {str(e)}")
         
         # 인덱스가 생성될 때까지 대기
         time.sleep(2)
-        print("✓ 스키마 생성 완료")
+        print("[OK] 스키마 생성 완료")
     
     def load_products(self):
         """Product 노드 로드"""
         csv_file = f'{self.data_dir}/products.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
         
         with self.driver.session(database=self.database) as session:
             for _, row in tqdm(df.iterrows(), total=len(df), desc="  Products"):
+                # 배터리 데이터 구조 확인
+                params = {
+                    'id': row['id'],
+                    'name': row['name'],
+                    'type': row['type'],
+                    'standard_cost': float(row['standard_cost']),
+                    'active': bool(row['active'])
+                }
+                # 선택적 필드 추가
+                if 'chemistry' in row and pd.notna(row['chemistry']):
+                    params['chemistry'] = row['chemistry']
+                if 'capacity' in row and pd.notna(row['capacity']):
+                    params['capacity'] = float(row['capacity'])
+                
                 session.run("""
-                    CREATE (p:Product {
-                        id: $id,
-                        name: $name,
-                        type: $type,
-                        pins: $pins,
-                        standard_cost: $standard_cost,
-                        active: $active
-                    })
-                """, dict(row))
+                    CREATE (p:Product)
+                    SET p = $params
+                """, params=params)
         
-        print(f"  ✓ Product 노드: {len(df)}개")
+        print(f"  [OK] Product 노드: {len(df)}개")
     
     def load_materials(self):
         """Material 노드 로드"""
         csv_file = f'{self.data_dir}/materials.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
         
         with self.driver.session(database=self.database) as session:
             for _, row in tqdm(df.iterrows(), total=len(df), desc="  Materials"):
+                params = {
+                    'id': row['id'],
+                    'name': row['name'],
+                    'type': row['type'],
+                    'unit': row['unit'],
+                    'standard_price': float(row['standard_price']),
+                    'supplier_cd': row['supplier_cd'],
+                    'active': bool(row['active'])
+                }
+                # 선택적 필드
+                if 'origin' in row and pd.notna(row['origin']):
+                    params['origin'] = row['origin']
+                
                 session.run("""
-                    CREATE (m:Material {
-                        id: $id,
-                        name: $name,
-                        type: $type,
-                        unit: $unit,
-                        standard_price: $standard_price,
-                        supplier_cd: $supplier_cd,
-                        active: $active
-                    })
-                """, dict(row))
+                    CREATE (m:Material)
+                    SET m = $params
+                """, params=params)
         
-        print(f"  ✓ Material 노드: {len(df)}개")
+        print(f"  [OK] Material 노드: {len(df)}개")
     
     def load_work_centers(self):
         """WorkCenter 노드 로드"""
         csv_file = f'{self.data_dir}/work_centers.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
         
         with self.driver.session(database=self.database) as session:
             for _, row in tqdm(df.iterrows(), total=len(df), desc="  WorkCenters"):
+                params = {
+                    'id': row['id'],
+                    'name': row['name'],
+                    'process_type': row['process_type'],
+                    'labor_rate_per_hour': float(row['labor_rate_per_hour']),
+                    'overhead_rate_per_hour': float(row['overhead_rate_per_hour']),
+                    'capacity_per_hour': int(row['capacity_per_hour']),
+                    'active': bool(row['active'])
+                }
+                # 선택적 필드
+                if 'location' in row and pd.notna(row['location']):
+                    params['location'] = row['location']
+                
                 session.run("""
-                    CREATE (wc:WorkCenter {
-                        id: $id,
-                        name: $name,
-                        process_type: $process_type,
-                        labor_rate_per_hour: $labor_rate_per_hour,
-                        overhead_rate_per_hour: $overhead_rate_per_hour,
-                        capacity_per_hour: $capacity_per_hour,
-                        active: $active
-                    })
-                """, dict(row))
+                    CREATE (wc:WorkCenter)
+                    SET wc = $params
+                """, params=params)
         
-        print(f"  ✓ WorkCenter 노드: {len(df)}개")
+        print(f"  [OK] WorkCenter 노드: {len(df)}개")
     
     def load_production_orders(self):
         """ProductionOrder 노드 로드"""
         csv_file = f'{self.data_dir}/production_orders.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
@@ -210,56 +233,127 @@ class Neo4jDataLoader:
                     })
                 """, dict(row))
         
-        print(f"  ✓ ProductionOrder 노드: {len(df)}개")
+        print(f"  [OK] ProductionOrder 노드: {len(df)}개")
     
     def load_variances(self):
         """Variance 노드 로드"""
         csv_file = f'{self.data_dir}/variances.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
         
         with self.driver.session(database=self.database) as session:
             for _, row in tqdm(df.iterrows(), total=len(df), desc="  Variances"):
+                params = {
+                    'id': row['id'],
+                    'order_no': row['order_no'],
+                    'cost_element': row['cost_element'],
+                    'variance_type': row['variance_type'],
+                    'variance_amount': float(row['variance_amount']),
+                    'variance_percent': float(row['variance_percent']),
+                    'severity': row['severity'],
+                    'cause_code': row['cause_code'],
+                    'analysis_date': row['analysis_date']
+                }
+                # variance_name 필드 추가
+                if 'variance_name' in row and pd.notna(row['variance_name']):
+                    params['variance_name'] = row['variance_name']
+                
                 session.run("""
-                    CREATE (v:Variance {
-                        id: $id,
-                        order_no: $order_no,
-                        cost_element: $cost_element,
-                        variance_type: $variance_type,
-                        variance_amount: $variance_amount,
-                        variance_percent: $variance_percent,
-                        severity: $severity,
-                        cause_code: $cause_code,
-                        analysis_date: date($analysis_date)
-                    })
-                """, dict(row))
+                    CREATE (v:Variance)
+                    SET v = $params
+                """, params=params)
         
-        print(f"  ✓ Variance 노드: {len(df)}개")
+        print(f"  [OK] Variance 노드: {len(df)}개")
     
     def load_causes(self):
         """Cause 노드 로드"""
         csv_file = f'{self.data_dir}/causes.csv'
         if not os.path.exists(csv_file):
-            print(f"  ✗ 파일 없음: {csv_file}")
+            print(f"  [X] 파일 없음: {csv_file}")
             return
         
         df = pd.read_csv(csv_file)
         
         with self.driver.session(database=self.database) as session:
             for _, row in tqdm(df.iterrows(), total=len(df), desc="  Causes"):
+                params = {
+                    'code': row['code'],
+                    'category': row['category'],
+                    'description': row['description'],
+                    'responsible_dept': row['responsible_dept']
+                }
+                # 선택적 필드
+                if 'variance_type' in row and pd.notna(row['variance_type']):
+                    params['variance_type'] = row['variance_type']
+                if 'detail' in row and pd.notna(row['detail']):
+                    params['detail'] = row['detail']
+                
                 session.run("""
-                    CREATE (c:Cause {
-                        code: $code,
-                        category: $category,
-                        description: $description,
-                        responsible_dept: $responsible_dept
-                    })
-                """, dict(row))
+                    CREATE (c:Cause)
+                    SET c = $params
+                """, params=params)
         
-        print(f"  ✓ Cause 노드: {len(df)}개")
+        print(f"  [OK] Cause 노드: {len(df)}개")
+    
+    def load_quality_defects(self):
+        """QualityDefect 노드 로드"""
+        csv_file = f'{self.data_dir}/quality_defects.csv'
+        if not os.path.exists(csv_file):
+            print(f"  [X] 파일 없음: {csv_file}")
+            return
+        
+        df = pd.read_csv(csv_file)
+        
+        with self.driver.session(database=self.database) as session:
+            for _, row in tqdm(df.iterrows(), total=len(df), desc="  QualityDefects"):
+                params = dict(row)
+                session.run("""
+                    CREATE (qd:QualityDefect)
+                    SET qd = $params
+                """, params=params)
+        
+        print(f"  [OK] QualityDefect 노드: {len(df)}개")
+    
+    def load_equipment_failures(self):
+        """EquipmentFailure 노드 로드"""
+        csv_file = f'{self.data_dir}/equipment_failures.csv'
+        if not os.path.exists(csv_file):
+            print(f"  [X] 파일 없음: {csv_file}")
+            return
+        
+        df = pd.read_csv(csv_file)
+        
+        with self.driver.session(database=self.database) as session:
+            for _, row in tqdm(df.iterrows(), total=len(df), desc="  EquipmentFailures"):
+                params = dict(row)
+                session.run("""
+                    CREATE (ef:EquipmentFailure)
+                    SET ef = $params
+                """, params=params)
+        
+        print(f"  [OK] EquipmentFailure 노드: {len(df)}개")
+    
+    def load_material_markets(self):
+        """MaterialMarket 노드 로드"""
+        csv_file = f'{self.data_dir}/material_markets.csv'
+        if not os.path.exists(csv_file):
+            print(f"  [X] 파일 없음: {csv_file}")
+            return
+        
+        df = pd.read_csv(csv_file)
+        
+        with self.driver.session(database=self.database) as session:
+            for _, row in tqdm(df.iterrows(), total=len(df), desc="  MaterialMarkets"):
+                params = dict(row)
+                session.run("""
+                    CREATE (mm:MaterialMarket)
+                    SET mm = $params
+                """, params=params)
+        
+        print(f"  [OK] MaterialMarket 노드: {len(df)}개")
     
     def load_relationships(self):
         """관계 로드"""
@@ -279,7 +373,7 @@ class Neo4jDataLoader:
                             unit: $unit
                         }]->(m)
                     """, dict(row))
-            print(f"  ✓ USES_MATERIAL: {len(df)}개")
+            print(f"  [OK] USES_MATERIAL: {len(df)}개")
         
         # PRODUCES 관계
         csv_file = f'{self.data_dir}/rel_produces.csv'
@@ -292,7 +386,7 @@ class Neo4jDataLoader:
                         MATCH (p:Product {id: $to})
                         CREATE (po)-[:PRODUCES]->(p)
                     """, dict(row))
-            print(f"  ✓ PRODUCES: {len(df)}개")
+            print(f"  [OK] PRODUCES: {len(df)}개")
         
         # HAS_VARIANCE 관계
         csv_file = f'{self.data_dir}/rel_has_variance.csv'
@@ -305,7 +399,7 @@ class Neo4jDataLoader:
                         MATCH (v:Variance {id: $to})
                         CREATE (po)-[:HAS_VARIANCE]->(v)
                     """, dict(row))
-            print(f"  ✓ HAS_VARIANCE: {len(df)}개")
+            print(f"  [OK] HAS_VARIANCE: {len(df)}개")
         
         # CAUSED_BY 관계
         csv_file = f'{self.data_dir}/rel_caused_by.csv'
@@ -318,7 +412,7 @@ class Neo4jDataLoader:
                         MATCH (c:Cause {code: $to})
                         CREATE (v)-[:CAUSED_BY]->(c)
                     """, dict(row))
-            print(f"  ✓ CAUSED_BY: {len(df)}개")
+            print(f"  [OK] CAUSED_BY: {len(df)}개")
         
         # CONSUMES 관계
         csv_file = f'{self.data_dir}/rel_consumes.csv'
@@ -326,16 +420,28 @@ class Neo4jDataLoader:
             df = pd.read_csv(csv_file)
             with self.driver.session(database=self.database) as session:
                 for _, row in tqdm(df.iterrows(), total=len(df), desc="  CONSUMES"):
+                    params = {
+                        'from': row['from'],
+                        'to': row['to'],
+                        'planned_qty': float(row['planned_qty']),
+                        'actual_qty': float(row['actual_qty']),
+                        'unit': row['unit']
+                    }
+                    # 선택적 필드
+                    if 'is_alternative' in row and pd.notna(row['is_alternative']):
+                        params['is_alternative'] = row['is_alternative']
+                    
                     session.run("""
                         MATCH (po:ProductionOrder {id: $from})
                         MATCH (m:Material {id: $to})
                         CREATE (po)-[:CONSUMES {
                             planned_qty: $planned_qty,
                             actual_qty: $actual_qty,
-                            unit: $unit
+                            unit: $unit,
+                            is_alternative: $is_alternative
                         }]->(m)
-                    """, dict(row))
-            print(f"  ✓ CONSUMES: {len(df)}개")
+                    """, params)
+            print(f"  [OK] CONSUMES: {len(df)}개")
         
         # WORKS_AT 관계
         csv_file = f'{self.data_dir}/rel_works_at.csv'
@@ -343,15 +449,75 @@ class Neo4jDataLoader:
             df = pd.read_csv(csv_file)
             with self.driver.session(database=self.database) as session:
                 for _, row in tqdm(df.iterrows(), total=len(df), desc="  WORKS_AT"):
+                    params = {
+                        'from': row['from'],
+                        'to': row['to']
+                    }
+                    # 선택적 필드
+                    if 'standard_time_min' in row and pd.notna(row['standard_time_min']):
+                        params['standard_time_min'] = float(row['standard_time_min'])
+                    if 'actual_time_min' in row and pd.notna(row['actual_time_min']):
+                        params['actual_time_min'] = float(row['actual_time_min'])
+                    if 'efficiency_rate' in row and pd.notna(row['efficiency_rate']):
+                        params['efficiency_rate'] = float(row['efficiency_rate'])
+                    if 'worker_count' in row and pd.notna(row['worker_count']):
+                        params['worker_count'] = int(row['worker_count'])
+                    if 'actual_qty' in row and pd.notna(row['actual_qty']):
+                        params['actual_qty'] = int(row['actual_qty'])
+                    
+                    # CREATE 문 동적 생성
+                    props = []
+                    for key in params.keys():
+                        if key not in ['from', 'to']:
+                            props.append(f"{key}: $params.{key}")
+                    props_str = ', '.join(props) if props else ''
+                    
+                    query = f"""
+                        MATCH (po:ProductionOrder {{id: $params.from}})
+                        MATCH (wc:WorkCenter {{id: $params.to}})
+                        CREATE (po)-[:WORKS_AT {{{props_str}}}]->(wc)
+                    """
+                    session.run(query, params={'params': params})
+            print(f"  [OK] WORKS_AT: {len(df)}개")
+        
+        # HAS_DEFECT 관계
+        csv_file = f'{self.data_dir}/rel_has_defect.csv'
+        if os.path.exists(csv_file):
+            df = pd.read_csv(csv_file)
+            with self.driver.session(database=self.database) as session:
+                for _, row in tqdm(df.iterrows(), total=len(df), desc="  HAS_DEFECT"):
                     session.run("""
-                        MATCH (po:ProductionOrder {id: $from})
-                        MATCH (wc:WorkCenter {id: $to})
-                        CREATE (po)-[:WORKS_AT {
-                            actual_time_min: $actual_time_min,
-                            actual_qty: $actual_qty
-                        }]->(wc)
+                        MATCH (c:Cause {code: $from})
+                        MATCH (qd:QualityDefect {id: $to})
+                        CREATE (c)-[:HAS_DEFECT]->(qd)
                     """, dict(row))
-            print(f"  ✓ WORKS_AT: {len(df)}개")
+            print(f"  [OK] HAS_DEFECT: {len(df)}개")
+        
+        # HAS_FAILURE 관계
+        csv_file = f'{self.data_dir}/rel_has_failure.csv'
+        if os.path.exists(csv_file):
+            df = pd.read_csv(csv_file)
+            with self.driver.session(database=self.database) as session:
+                for _, row in tqdm(df.iterrows(), total=len(df), desc="  HAS_FAILURE"):
+                    session.run("""
+                        MATCH (c:Cause {code: $from})
+                        MATCH (ef:EquipmentFailure {id: $to})
+                        CREATE (c)-[:HAS_FAILURE]->(ef)
+                    """, dict(row))
+            print(f"  [OK] HAS_FAILURE: {len(df)}개")
+        
+        # MARKET_PRICE 관계
+        csv_file = f'{self.data_dir}/rel_market_price.csv'
+        if os.path.exists(csv_file):
+            df = pd.read_csv(csv_file)
+            with self.driver.session(database=self.database) as session:
+                for _, row in tqdm(df.iterrows(), total=len(df), desc="  MARKET_PRICE"):
+                    session.run("""
+                        MATCH (m:Material {id: $from})
+                        MATCH (mm:MaterialMarket {id: $to})
+                        CREATE (m)-[:MARKET_PRICE]->(mm)
+                    """, dict(row))
+            print(f"  [OK] MARKET_PRICE: {len(df)}개")
     
     def create_additional_relationships(self):
         """추가 관계 생성 (분석 최적화용)"""
@@ -369,7 +535,7 @@ class Neo4jDataLoader:
                 RETURN COUNT(*) as count
             """)
             count = result.single()['count']
-            print(f"  ✓ RELATED_TO_MATERIAL: {count}개")
+            print(f"  [OK] RELATED_TO_MATERIAL: {count}개")
             
             # NEXT_ORDER: 시계열 순서 관계
             print("  - NEXT_ORDER 관계 생성 중...")
@@ -384,7 +550,7 @@ class Neo4jDataLoader:
                 RETURN COUNT(*) as count
             """)
             count = result.single()['count']
-            print(f"  ✓ NEXT_ORDER: {count}개")
+            print(f"  [OK] NEXT_ORDER: {count}개")
             
             # SAME_PRODUCT: 동일 제품 생산 오더 연결
             print("  - SAME_PRODUCT 관계 생성 중...")
@@ -395,7 +561,7 @@ class Neo4jDataLoader:
                 RETURN COUNT(*) as count
             """)
             count = result.single()['count']
-            print(f"  ✓ SAME_PRODUCT: {count}개")
+            print(f"  [OK] SAME_PRODUCT: {count}개")
     
     def verify_data(self):
         """데이터 로드 검증"""
@@ -460,6 +626,9 @@ class Neo4jDataLoader:
             self.load_production_orders()
             self.load_variances()
             self.load_causes()
+            self.load_quality_defects()
+            self.load_equipment_failures()
+            self.load_material_markets()
             
             # 관계 로드
             self.load_relationships()
@@ -477,7 +646,7 @@ class Neo4jDataLoader:
             return True
         
         except Exception as e:
-            print(f"\n✗ 오류 발생: {str(e)}")
+            print(f"\n[X] 오류 발생: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -489,14 +658,14 @@ def main():
     # 데이터 파일 존재 확인
     data_dir = 'data/neo4j_import'
     if not os.path.exists(data_dir):
-        print(f"✗ 데이터 디렉토리가 없습니다: {data_dir}")
+        print(f"[X] 데이터 디렉토리가 없습니다: {data_dir}")
         print("먼저 'python data/generate_data.py'를 실행하세요.")
         return
     
     loader = Neo4jDataLoader()
     
     # 데이터베이스 초기화 여부 확인
-    print("\n⚠️  기존 데이터를 삭제하고 새로 로드하시겠습니까?")
+    print("\n[!]  기존 데이터를 삭제하고 새로 로드하시겠습니까?")
     print("   이 작업은 되돌릴 수 없습니다!")
     response = input("   계속하려면 'yes'를 입력하세요: ")
     
